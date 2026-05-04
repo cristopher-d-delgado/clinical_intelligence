@@ -1,20 +1,25 @@
 """
 download_datasets.py -- Download all datasets for the ICU Clinical Intelligence project.
 
-All data is saved inside the project under clinical_intelligence/data/:
+All final data is saved inside the project under clinical_intelligence/data/:
 
     data/
-    |-- mimic_demo/          MIMIC-III CSVs          (PhysioNet, no auth)
+    |-- mimic_demo/               MIMIC-III CSVs          (PhysioNet, no auth)
     |-- text/
-    |   `-- mtsamples.csv    Clinical notes          (Kaggle, API key needed)
+    |   `-- mtsamples.csv         Clinical notes          (Kaggle, API key needed)
     |-- huggingface/
-    |   |-- datasets/
-    |   |   |-- pubmedqa/    QA pairs for fine-tuning (HuggingFace, no auth)
-    |   |   `-- pmc_patients/ Clinical narratives     (HuggingFace, no auth)
-    |   `-- hub/             HF model cache
-    `-- ehrsql/              NL->SQL benchmark        (GitHub, no auth)
+    |   `-- datasets/
+    |       |-- pubmedqa/         QA pairs for fine-tuning (HuggingFace, no auth)
+    |       `-- pmc_patients/     Clinical narratives      (HuggingFace, no auth)
+    `-- ehrsql/                   NL->SQL benchmark        (GitHub, no auth)
 
-VitalDB streams at runtime via pip library -- no download needed.
+VitalDB streams at runtime via pip -- no download needed.
+
+Windows note:
+    HuggingFace uses C:/hf_cache as a SHORT working directory during download
+    to avoid the Windows 260-char MAX_PATH limit on long OneDrive paths.
+    Final datasets are then moved into clinical_intelligence/data/ as normal.
+    You can delete C:/hf_cache after all downloads complete.
 
 Usage:
     python download_datasets.py              # download everything
@@ -40,16 +45,13 @@ import zipfile
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# STEP 1: Resolve all paths and configure HuggingFace cache
+# Path resolution
 #
-# We use Path.resolve() to get the true absolute path with no symlinks or
-# relative segments. This is what breaks HF on Windows/OneDrive -- the
-# presence of spaces or sync markers in the path corrupts Arrow file writes.
+# PROJECT_ROOT = clinical_intelligence/   (one level up from python/)
+# DATA_DIR     = clinical_intelligence/data/
 #
-# By pointing HF_DATASETS_CACHE at data/huggingface/datasets/ (resolved),
-# all HuggingFace data stays inside the project on every platform.
-# This must happen BEFORE `from datasets import ...` as HF reads env vars
-# at import time.
+# Path(__file__).resolve().parent       -> clinical_intelligence/python/
+# Path(__file__).resolve().parent.parent -> clinical_intelligence/
 # ---------------------------------------------------------------------------
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -59,17 +61,47 @@ TEXT_DIR     = DATA_DIR / "text"
 HF_DIR       = DATA_DIR / "huggingface"
 EHRSQL_DIR   = DATA_DIR / "ehrsql"
 
-# Create directories up front so env vars point to real paths
-for _d in [DATA_DIR, MIMIC_DIR, TEXT_DIR, HF_DIR]:
+# Final save paths for HuggingFace datasets (inside project)
+PUBMEDQA_SAVE = HF_DIR / "datasets" / "pubmedqa"
+PMC_SAVE      = HF_DIR / "datasets" / "pmc_patients"
+
+# Only pre-create essential non-HF directories.
+# HF save destinations (pubmedqa/, pmc_patients/) are created by
+# save_to_disk() / open() only on success -- avoids empty ghost folders.
+for _d in [DATA_DIR, MIMIC_DIR, TEXT_DIR]:
     _d.mkdir(parents=True, exist_ok=True)
 
-# Configure HF caches -- resolved posix paths work on Windows too
-os.environ.setdefault("HF_DATASETS_CACHE",  (HF_DIR / "datasets").resolve().as_posix())
-os.environ.setdefault("HF_HOME",             (HF_DIR / "hub").resolve().as_posix())
-os.environ.setdefault("TRANSFORMERS_CACHE",  (HF_DIR / "transformers").resolve().as_posix())
+# ---------------------------------------------------------------------------
+# Windows MAX_PATH fix for HuggingFace
+#
+# Windows caps paths at 260 chars. HuggingFace appends long hash filenames
+# during its Arrow conversion step, which pushes deep OneDrive paths over
+# the limit and causes [WinError 206] or [WinError 5].
+#
+# Solution: use C:/hf_cache as the SHORT working cache where HF does its
+# temp work, then save_to_disk() writes the final clean output into the
+# project's data/ folder (which has no hash suffixes and fits in 260 chars).
+#
+# On Mac/Linux the project path is used directly -- no workaround needed.
+#
+# MUST be set before `from datasets import ...`
+# ---------------------------------------------------------------------------
+
+IS_WINDOWS = platform.system() == "Windows"
+
+if IS_WINDOWS:
+    HF_WORKING_CACHE = Path("C:/hf_cache")
+else:
+    HF_WORKING_CACHE = HF_DIR / "cache"
+
+HF_WORKING_CACHE.mkdir(parents=True, exist_ok=True)
+
+os.environ["HF_DATASETS_CACHE"] = HF_WORKING_CACHE.as_posix()
+os.environ["HF_HOME"]           = (HF_WORKING_CACHE / "hub").as_posix()
+os.environ["TRANSFORMERS_CACHE"] = (HF_WORKING_CACHE / "transformers").as_posix()
 
 # ---------------------------------------------------------------------------
-# STEP 2: Imports (after env vars are set)
+# Imports (after env vars are set)
 # ---------------------------------------------------------------------------
 
 try:
@@ -78,8 +110,8 @@ try:
 except ImportError:
     HF_AVAILABLE = False
 
-# Kaggle: authenticate once, store the API object. Using a module-level object
-# avoids the "kg not defined" bug from the previous version.
+# Kaggle: authenticate once at module level into a single API object.
+# This avoids the previous "kg not defined" bug.
 KAGGLE_API = None
 KAGGLE_AVAILABLE = False
 _kaggle_key = Path.home() / ".kaggle" / "kaggle.json"
@@ -117,7 +149,7 @@ def info(msg): print(f"  {BLUE}>{RESET}  {msg}")
 def head(msg): print(f"\n{BOLD}{msg}{RESET}")
 
 # ---------------------------------------------------------------------------
-# Shared download helper
+# Shared helpers
 # ---------------------------------------------------------------------------
 
 def _download_file(url: str, dest: Path, desc: str = "") -> bool:
@@ -147,15 +179,15 @@ def _download_file(url: str, dest: Path, desc: str = "") -> bool:
 
 
 def _hf_retry_hint(repo: str, config: str | None, save_path: str):
-    """Print a manual retry snippet with pre-filled cache path."""
+    """Print a copy-paste retry snippet."""
     config_arg = f', "{config}"' if config else ""
     print(f"""
-  {YELLOW}Retry manually:{RESET}
+  {YELLOW}Retry manually in Python:{RESET}
     import os
-    os.environ["HF_DATASETS_CACHE"] = "{(HF_DIR / "datasets").resolve().as_posix()}"
+    os.environ["HF_DATASETS_CACHE"] = "{HF_WORKING_CACHE.as_posix()}"
     from datasets import load_dataset
-    ds = load_dataset("{repo}"{config_arg})
-    ds.save_to_disk("{save_path}")
+    ds = load_dataset("{repo}"{config_arg}, verification_mode="no_checks")
+    ds.save_to_disk(r"{save_path}")
 """)
 
 
@@ -179,7 +211,7 @@ MIMIC_FILES = [
 
 def download_mimic(force: bool = False) -> bool:
     head("Dataset 1 -- MIMIC-III Clinical Database Demo")
-    info(f"Destination: {MIMIC_DIR}/")
+    info(f"Destination: {MIMIC_DIR}")
     info("Source: physionet.org (no signup required)")
 
     already = [f for f in MIMIC_FILES if (MIMIC_DIR / f).exists()]
@@ -202,14 +234,14 @@ def download_mimic(force: bool = False) -> bool:
             warn(f"{fname} -- download failed")
 
     if success_count >= 20:
-        ok(f"MIMIC-III ready: {success_count}/{len(MIMIC_FILES)} files in {MIMIC_DIR}/")
+        ok(f"MIMIC-III ready: {success_count}/{len(MIMIC_FILES)} files in {MIMIC_DIR}")
         return True
     else:
         err(f"Only {success_count}/{len(MIMIC_FILES)} files downloaded")
         print(f"""
   {YELLOW}Manual download:{RESET}
   1. https://physionet.org/content/mimiciii-demo/1.4/
-  2. Download all CSVs and place them in: {MIMIC_DIR}/
+  2. Download all CSVs and place them in: {MIMIC_DIR}
 """)
         return False
 
@@ -221,10 +253,10 @@ def download_mimic(force: bool = False) -> bool:
 
 def download_mtsamples(force: bool = False) -> bool:
     head("Dataset 2 -- MTSamples (5,000 clinical transcription notes)")
-    info(f"Destination: {TEXT_DIR}/mtsamples.csv")
+    dest = TEXT_DIR / "mtsamples.csv"
+    info(f"Destination: {dest}")
     info("Source: Kaggle -- tboyle10/medicaltranscriptions")
 
-    dest = TEXT_DIR / "mtsamples.csv"
     if dest.exists() and not force:
         ok(f"Already present ({dest.stat().st_size / 1e6:.1f} MB) -- skipping")
         return True
@@ -271,7 +303,6 @@ def download_mtsamples(force: bool = False) -> bool:
         except Exception as e:
             warn(f"Unzip failed: {e}")
 
-    # Strategy 3: manual
     err("Could not download MTSamples automatically")
     print(f"""
   {YELLOW}Setup Kaggle API key (30 seconds):{RESET}
@@ -282,59 +313,62 @@ def download_mtsamples(force: bool = False) -> bool:
 
   {YELLOW}Or manual:{RESET}
   1. kaggle.com/datasets/tboyle10/medicaltranscriptions
-  2. Place mtsamples.csv in: {TEXT_DIR}/
+  2. Place mtsamples.csv in: {TEXT_DIR}
 """)
     return False
 
 
 # ===========================================================================
 # Dataset 3 -- PubMedQA
-# Saved to: data/huggingface/datasets/pubmedqa/
+#
+# Two-path strategy (Windows MAX_PATH fix):
+#   HF working cache : C:/hf_cache          (short path, Arrow writes here)
+#   Final save       : data/huggingface/datasets/pubmedqa/  (inside project)
 # ===========================================================================
 
 def download_pubmedqa(force: bool = False) -> bool:
     head("Dataset 3 -- PubMedQA (273K biomedical QA pairs)")
-    dest = HF_DIR / "datasets" / "pubmedqa"
-    info(f"Destination: {dest}/")
+    info(f"Destination: {PUBMEDQA_SAVE}")
     info("Source: HuggingFace -- qiaojin/PubMedQA")
+    if IS_WINDOWS:
+        info(f"HF working cache: {HF_WORKING_CACHE}  (short path avoids WinError 206)")
 
-    if dest.exists() and any(dest.iterdir()) and not force:
-        ok(f"Already present -- skipping")
+    labeled_dest = PUBMEDQA_SAVE / "pqa_labeled"
+    if labeled_dest.exists() and any(labeled_dest.iterdir()) and not force:
+        ok("Already present -- skipping")
         return True
 
     if not HF_AVAILABLE:
         err("HuggingFace datasets not installed -- run: pip install datasets")
         return False
 
-    dest.mkdir(parents=True, exist_ok=True)
-    info(f"HF cache: {os.environ.get('HF_DATASETS_CACHE')}")
-
-    info("Downloading pqa_labeled (~1K expert QA pairs)...")
+    # qiaojin/PubMedQA uses a custom dataset script that broke in datasets>=4.0.
+    # llamafactory/PubMedQA is a clean Parquet mirror of the same data.
+    info("Downloading via llamafactory/PubMedQA mirror (clean Parquet, no broken script)...")
     try:
-        ds = load_dataset("qiaojin/PubMedQA", "pqa_labeled")
-        ds.save_to_disk(str(dest / "pqa_labeled"))
-        ok(f"pqa_labeled: {len(ds['train']):,} pairs -> {dest}/pqa_labeled")
+        ds = load_dataset("llamafactory/PubMedQA")
+        ds.save_to_disk(str(labeled_dest))
+        total = sum(len(v) for v in ds.values())
+        ok(f"PubMedQA: {total:,} pairs -> {labeled_dest}")
+        ok("PubMedQA ready")
+        return True
     except Exception as e:
-        err(f"pqa_labeled failed: {e}")
-        _hf_retry_hint("qiaojin/PubMedQA", "pqa_labeled", str(dest / "pqa_labeled"))
+        err(f"PubMedQA failed: {e}")
+        print(f"""
+  Retry manually in Python:
+    import os
+    os.environ["HF_DATASETS_CACHE"] = "{HF_WORKING_CACHE.as_posix()}"
+    from datasets import load_dataset
+    ds = load_dataset("llamafactory/PubMedQA")
+    ds.save_to_disk(r"{labeled_dest}")
+""")
         return False
-
-    info("Downloading pqa_artificial (~211K auto-generated, optional)...")
-    try:
-        ds_art = load_dataset("qiaojin/PubMedQA", "pqa_artificial")
-        ds_art.save_to_disk(str(dest / "pqa_artificial"))
-        ok(f"pqa_artificial: {len(ds_art['train']):,} pairs -> {dest}/pqa_artificial")
-    except Exception as e:
-        warn(f"pqa_artificial skipped (optional): {e}")
-
-    ok("PubMedQA ready")
-    return True
 
 
 # ===========================================================================
 # Dataset 4 -- EHRSQL
 # Saved to: data/ehrsql/
-# glee4810/EHRSQL was removed from HuggingFace Hub -- clone from GitHub.
+# Cloned from GitHub -- was removed from HuggingFace Hub.
 # ===========================================================================
 
 EHRSQL_GITHUB = "https://github.com/glee4810/EHRSQL.git"
@@ -342,11 +376,11 @@ EHRSQL_GITHUB = "https://github.com/glee4810/EHRSQL.git"
 
 def download_ehrsql(force: bool = False) -> bool:
     head("Dataset 4 -- EHRSQL (NL->SQL pairs on MIMIC schema)")
-    info(f"Destination: {EHRSQL_DIR}/")
-    info("Source: GitHub -- glee4810/EHRSQL (removed from HuggingFace Hub)")
+    info(f"Destination: {EHRSQL_DIR}")
+    info("Source: GitHub -- glee4810/EHRSQL")
 
     if EHRSQL_DIR.exists() and any(EHRSQL_DIR.iterdir()) and not force:
-        ok(f"Already present -- skipping")
+        ok("Already present -- skipping")
         return True
 
     # Strategy 1: git clone
@@ -360,7 +394,7 @@ def download_ehrsql(force: bool = False) -> bool:
         )
         if result.returncode == 0:
             n = len(list(EHRSQL_DIR.rglob("*.json")))
-            ok(f"EHRSQL cloned -> {EHRSQL_DIR}/ ({n} JSON files)")
+            ok(f"EHRSQL cloned -> {EHRSQL_DIR} ({n} JSON files)")
             return True
         else:
             warn(f"git clone failed: {result.stderr.strip()}")
@@ -371,7 +405,6 @@ def download_ehrsql(force: bool = False) -> bool:
     info("Downloading as zip archive...")
     zip_dest = DATA_DIR / "ehrsql.zip"
     zip_url  = "https://github.com/glee4810/EHRSQL/archive/refs/heads/main.zip"
-
     if _download_file(zip_url, zip_dest, "EHRSQL.zip") and zip_dest.exists():
         try:
             with zipfile.ZipFile(zip_dest, "r") as z:
@@ -382,7 +415,7 @@ def download_ehrsql(force: bool = False) -> bool:
                 if EHRSQL_DIR.exists():
                     shutil.rmtree(EHRSQL_DIR)
                 extracted.rename(EHRSQL_DIR)
-            ok(f"EHRSQL extracted -> {EHRSQL_DIR}/")
+            ok(f"EHRSQL extracted -> {EHRSQL_DIR}")
             return True
         except Exception as e:
             err(f"Zip extraction failed: {e}")
@@ -402,10 +435,10 @@ def download_ehrsql(force: bool = False) -> bool:
 
 def check_vitaldb() -> bool:
     head("Dataset 5 -- VitalDB (6,388 surgical vital sign cases)")
-    info("Source: pip library -- no download, streams at runtime")
+    info("Source: pip library -- no download needed, streams at runtime")
     try:
         import vitaldb
-        ok("vitaldb installed -- use vitaldb.load(['HR', 'PLETH_SPO2']) at runtime")
+        ok("vitaldb installed -- call vitaldb.load(['HR', 'PLETH_SPO2']) at runtime")
         try:
             tracks = vitaldb.trks("HR")
             ok(f"VitalDB API reachable -- {len(tracks)} cases with HR data")
@@ -419,37 +452,56 @@ def check_vitaldb() -> bool:
 
 # ===========================================================================
 # Bonus -- PMC-Patients
-# Saved to: data/huggingface/datasets/pmc_patients/
+#
+# Two-path strategy (Windows MAX_PATH fix):
+#   HF working cache : C:/hf_cache          (short path, Arrow writes here)
+#   Final save       : data/huggingface/datasets/pmc_patients/
 # ===========================================================================
 
 def download_pmc_patients(force: bool = False) -> bool:
     head("Bonus -- PMC-Patients (167K clinical narratives for RAG)")
-    dest = HF_DIR / "datasets" / "pmc_patients"
-    info(f"Destination: {dest}/")
+    info(f"Destination: {PMC_SAVE}")
     info("Source: HuggingFace -- AGBonnet/augmented-clinical-notes")
+    if IS_WINDOWS:
+        info(f"HF working cache: {HF_WORKING_CACHE}  (short path avoids WinError 206)")
 
-    if dest.exists() and any(dest.iterdir()) and not force:
-        ok(f"Already present -- skipping")
+    if PMC_SAVE.exists() and any(PMC_SAVE.iterdir()) and not force:
+        ok("Already present -- skipping")
         return True
 
     if not HF_AVAILABLE:
         err("HuggingFace datasets not installed -- run: pip install datasets")
         return False
 
-    dest.mkdir(parents=True, exist_ok=True)
-    info(f"HF cache: {os.environ.get('HF_DATASETS_CACHE')}")
-
-    info("Downloading (~372 MB)...")
+    # Use streaming=True to bypass Arrow generation entirely.
+    # Saves as JSONL which is directly usable by LangChain for RAG.
+    import json
+    info("Downloading via streaming (~372 MB) -- bypasses Arrow generation issues...")
+    out_file = PMC_SAVE / "data.jsonl"
     try:
-        ds = load_dataset("AGBonnet/augmented-clinical-notes")
-        ds.save_to_disk(str(dest))
-        total = sum(len(v) for v in ds.values())
-        ok(f"PMC-Patients saved -> {dest}/ ({total:,} clinical narratives)")
+        ds = load_dataset("AGBonnet/augmented-clinical-notes", streaming=True)
+        count = 0
+        with open(out_file, "w", encoding="utf-8") as f:
+            for row in ds["train"]:
+                f.write(json.dumps(row, default=str) + "\n")
+                count += 1
+                if count % 10000 == 0:
+                    info(f"  {count:,} records saved...")
+        ok(f"PMC-Patients saved -> {out_file} ({count:,} narratives)")
         return True
     except Exception as e:
         warn(f"PMC-Patients failed: {e}")
         warn("Optional -- MTSamples already covers RAG for Track 2")
-        _hf_retry_hint("AGBonnet/augmented-clinical-notes", None, str(dest))
+        print(f"""
+  Retry manually in Python:
+    import os, json
+    os.environ["HF_DATASETS_CACHE"] = "{HF_WORKING_CACHE.as_posix()}"
+    from datasets import load_dataset
+    ds = load_dataset("AGBonnet/augmented-clinical-notes", streaming=True)
+    with open(r"{out_file}", "w") as f:
+        for row in ds["train"]:
+            f.write(json.dumps(row, default=str) + "\\n")
+""")
         return False
 
 
@@ -461,20 +513,22 @@ def check_status():
     head("Dataset status check")
     print(f"  Project root : {PROJECT_ROOT}")
     print(f"  Data folder  : {DATA_DIR}")
+    if IS_WINDOWS:
+        print(f"  HF work cache: {HF_WORKING_CACHE}  (temp, can delete after downloads)")
     print()
 
     checks = {
-        "MIMIC-III demo" : MIMIC_DIR / "PATIENTS.csv",
-        "MTSamples"      : TEXT_DIR  / "mtsamples.csv",
-        "PubMedQA"       : HF_DIR / "datasets" / "pubmedqa" / "pqa_labeled",
+        "MIMIC-III demo" : MIMIC_DIR  / "PATIENTS.csv",
+        "MTSamples"      : TEXT_DIR   / "mtsamples.csv",
+        "PubMedQA"       : PUBMEDQA_SAVE / "pqa_labeled",
         "EHRSQL"         : EHRSQL_DIR / "data",
-        "PMC-Patients"   : HF_DIR / "datasets" / "pmc_patients" / "dataset_dict.json",
+        "PMC-Patients"   : PMC_SAVE   / "dataset_dict.json",
     }
 
     all_good = True
     for name, path in checks.items():
         if path.exists():
-            ok(f"{name:<25} ready  ({path})")
+            ok(f"{name:<25} ready  ->  {path}")
         else:
             warn(f"{name:<25} NOT found  (expected: {path})")
             all_good = False
@@ -489,7 +543,7 @@ def check_status():
     print()
     if all_good:
         ok("All datasets ready.")
-        print(f"\n  Next step: python ingest.py --data_dir {MIMIC_DIR} --db_path {DATA_DIR / 'mimic.db'}\n")
+        print(f"\n  Next: python ingest.py --data_dir {MIMIC_DIR} --db_path {DATA_DIR / 'mimic.db'}\n")
     else:
         warn("Some datasets missing -- re-run: python download_datasets.py")
 
@@ -530,7 +584,8 @@ def main():
     print("-" * 48)
     print(f"Project root : {PROJECT_ROOT}")
     print(f"Data folder  : {DATA_DIR}")
-    print(f"HF cache     : {os.environ.get('HF_DATASETS_CACHE')}")
+    if IS_WINDOWS:
+        print(f"HF work cache: {HF_WORKING_CACHE}  (short path -- avoids WinError 206)")
 
     if args.check:
         check_status()
@@ -570,7 +625,9 @@ def main():
     print()
     if all_ok:
         print(f"{GREEN}{BOLD}All datasets ready.{RESET}")
-        print(f"Next step: python ingest.py --data_dir {MIMIC_DIR} --db_path {DATA_DIR / 'mimic.db'}\n")
+        if IS_WINDOWS:
+            print(f"  {YELLOW}Tip: You can delete C:/hf_cache now -- all data is in {DATA_DIR}{RESET}")
+        print(f"\n  Next: python ingest.py --data_dir {MIMIC_DIR} --db_path {DATA_DIR / 'mimic.db'}\n")
     else:
         print(f"{YELLOW}Some datasets need manual steps -- see instructions above.{RESET}\n")
 

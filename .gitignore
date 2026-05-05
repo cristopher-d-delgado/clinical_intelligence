@@ -219,3 +219,6 @@ __marimo__/
 
 # Ignore data folder 
 data/
+
+# Ignore db folder
+db/

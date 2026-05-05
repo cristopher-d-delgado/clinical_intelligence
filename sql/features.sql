@@ -4,9 +4,9 @@ Create 7 View Tables.
     Purpose: The base table. Every other view joins back to this one. 
     
     Source tables: 
-        * icustays
-        * admissions
-        * patients   
+        * icustays: contains icu entry times/exist
+        * admissions: hospital admission/discharge times, insurance, ethnicity, admission type
+        * patients: gender, date of birth, date of death   
     
     What it computes: 
         * ICU length of stay in hours using JULIANDAY() math
@@ -78,3 +78,10 @@ Create 7 View Tables.
     
     This is what Python queries: SELECT * FROM v_features is the single query that pulls the entire feature matrix into pandas.
 """
+
+# ========================================
+# Table View 1: v_cohort
+# =========================================
+# Can join icustays with admission through 'hadm_id'
+# Can join icustays with patients through 'subject_id'
+

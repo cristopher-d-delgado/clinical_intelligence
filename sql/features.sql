@@ -85,3 +85,18 @@ Create 7 View Tables.
 # Can join icustays with admission through 'hadm_id'
 # Can join icustays with patients through 'subject_id'
 
+# From icustays need columns: [intime, outime] 
+#   To determine length of stay in ICU
+# FROM admissions need columns: [admittime, dischtime]
+#   To determine hospital length of stay
+# FROM patients need columns: [dob]
+#   determine the age of patients using admittime
+
+# =========================================
+# Table View 2: v_vitals_24h
+# =========================================
+# Can join icustays with chartevents through `subject id`
+# We need columns intime from icustays
+    # Help us view the admission time when patient entered ICU
+# Need columns itemid, charttime, and valuenum from chartevents
+    # Determine individual vital signs with itemid, charttime, and valuenum

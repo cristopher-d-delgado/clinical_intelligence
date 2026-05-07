@@ -450,3 +450,75 @@ WHERE itemid IN (
     221906,  -- Norepinephrine Metavision
     222315   -- Vasopressin Metavision
 );
+
+/*
+View    : v_features
+Purpose : Master feature view — assembles all upstream views into one
+            flat table ready for pandas and XGBoost. One row per ICU stay,
+            one column per feature plus the target variable.
+
+Source views (all LEFT JOINed onto v_cohort):
+    v_cohort            — Demographics, LOS, target variable
+    v_vitals_24h        — Vital sign stats, joined on icustay_id
+    v_labs_24h          — Lab result stats, joined on icustay_id
+    v_comorbidities     — Comorbidity flags, joined on hadm_id
+    v_prior_admissions  — Prior admission count, joined on hadm_id
+    v_vasopressors      — Vasopressor flag, joined on icustay_id
+
+Join type:
+    LEFT JOIN throughout — ensures all ICU stays from v_cohort are
+    retained even if they have no matching rows in downstream views
+    (e.g. no labs drawn, no vasopressors given). Missing values appear
+    as NULL and are handled by median imputation in sql_features.py.
+
+Special handling:
+    COALESCE(vp.vasopressor_flag, 0) — converts NULL to 0 for ICU stays
+    with no vasopressor rows in v_vasopressors.
+
+Output:
+    ~136 rows (one per ICU stay in the demo)
+    ~50+ columns covering demographics, vitals, labs,
+    comorbidities, prior history, interventions, and target
+
+Usage:
+    Queried by sql_features.py via:
+        SELECT * FROM v_features
+    The resulting DataFrame is passed through _clean() for
+    categorical encoding, outlier clipping, and NaN imputation
+    before being handed to XGBoost in model.py.
+*/
+CREATE VIEW IF NOT EXISTS v_features AS
+SELECT
+    -- from v_cohort
+    c.subject_id,
+    c.hadm_id,
+    c.icustay_id,
+    c.gender,
+    c.age_at_admit,
+    c.icu_los_hours,
+    c.hosp_los_days,
+    c.admission_type,
+    c.insurance,
+    c.died_in_hospital,
+
+    -- from v_vitals_24h
+    v.*,  -- or list each column explicitly
+
+    -- from v_labs_24h
+    l.*,
+
+    -- from v_comorbidities
+    co.*,
+
+    -- from v_prior_admissions
+    pa.n_prior_admissions,
+
+    -- from v_vasopressors (special handling for NULL)
+    COALESCE(vp.vasopressor_flag, 0) AS vasopressor_flag
+
+FROM v_cohort AS c
+LEFT JOIN v_vitals_24h AS v  ON c.icustay_id = v.icustay_id
+LEFT JOIN v_labs_24h AS l  ON c.icustay_id = l.icustay_id
+LEFT JOIN v_comorbidities AS co ON c.hadm_id = co.hadm_id
+LEFT JOIN v_prior_admissions AS pa ON c.hadm_id = pa.hadm_id
+LEFT JOIN v_vasopressors AS vp ON c.icustay_id = vp.icustay_id

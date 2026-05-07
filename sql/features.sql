@@ -391,3 +391,62 @@ LEFT JOIN admissions AS a2
     AND a2.admittime  < a1.admittime
 GROUP BY a1.subject_id, a1.hadm_id
 ORDER BY n_prior_admissions DESC;
+
+/*
+View    : v_vasopressors
+Purpose : Binary flag indicating whether vasopressors were administered
+            during each ICU stay. Vasopressor use indicates haemodynamic
+            instability and is strongly associated with ICU mortality.
+
+Source tables:
+    inputevents_cv — CareVue medication inputs (older charting system)
+    inputevents_mv — Metavision medication inputs (newer charting system)
+
+Vasopressors captured:
+    Dobutamine      — CV: 30042, 30306, 5747       MV: 221653
+    Dopamine        — CV: 4501, 5805, 5329, 30043,  MV: 221662
+                            30307
+    Epinephrine     — CV: 30044, 30309, 30119, 3112 MV: 221289
+    Norepinephrine  — MV: 221906
+    Vasopressin     — CV: 1222, 2765, 42802, 2561,  MV: 222315
+                            2248, 6255, 2445, 30051,
+                            7341, 1136, 2334, 1327,
+                            42273
+
+Method:
+    UNION of two SELECT DISTINCT queries — one per charting system.
+    DISTINCT ensures one row per ICU stay regardless of how many
+    vasopressor administrations occurred.
+    UNION (not UNION ALL) removes any duplicate icustay_ids that
+    appear in both systems.
+
+Output:
+    icustay_id      — ICU stay identifier
+    vasopressor_flag — Always 1 (presence flag only)
+
+Notes:
+    - Absence of a row in this view means no vasopressors were given.
+        In v_features this is handled with COALESCE(vp.vasopressor_flag, 0)
+        to convert NULL to 0 for ICU stays not in this view.
+    - 32 of 136 ICU stays in the demo had vasopressor use (~24%).
+*/
+CREATE VIEW IF NOT EXISTS v_vasopressors AS
+SELECT DISTINCT icustay_id, 1 AS vasopressor_flag
+FROM inputevents_cv
+WHERE itemid IN (
+    4501, 5805, 30042, 30306, 5329, 30043, 30307,  -- Dopamine/Dobutamine CareVue
+    30044, 30309, 30119,                             -- Epinephrine CareVue
+    1222, 2765, 42802, 2561, 2248, 6255, 2445,      -- Vasopressin CareVue
+    30051, 7341, 5747, 3112, 1136, 2334, 1327,      -- Others CareVue
+    42273
+)
+UNION
+SELECT DISTINCT icustay_id, 1 AS vasopressor_flag
+FROM inputevents_mv
+WHERE itemid IN (
+    221653,  -- Dobutamine Metavision
+    221662,  -- Dopamine Metavision
+    221289,  -- Epinephrine Metavision
+    221906,  -- Norepinephrine Metavision
+    222315   -- Vasopressin Metavision
+);

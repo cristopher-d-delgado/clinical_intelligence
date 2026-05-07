@@ -127,3 +127,144 @@ AND   c.charttime <= DATETIME(i.intime, '+24 hours')
 AND   c.valuenum IS NOT NULL
 AND   c.valuenum > 0
 GROUP BY i.icustay_id;
+
+/*
+View    : v_vitals_24h
+Purpose : Vital sign summary statistics for the first 24 hours of each
+            ICU stay. Provides mean, min, and max for each vital sign plus
+            a total measurement count as a monitoring intensity proxy.
+
+Source tables:
+    icustays    — Provides icustay_id and intime for the 24-hour window
+    chartevents — Raw vital sign measurements with itemid, charttime,
+                    and valuenum
+
+Time window:
+    charttime >= intime
+    charttime <= DATETIME(intime, '+24 hours')
+    Only measurements in the first 24 hours of ICU admission are included.
+    This ensures features are comparable across patients regardless of
+    total ICU length of stay, and reflects information available early
+    enough to support clinical decision making.
+
+Item ID mapping (CareVue / Metavision):
+    Heart Rate        : 211, 220045
+    Systolic BP       : 51, 220179
+    SpO2              : 646, 220277
+    Respiratory Rate  : 618, 220210
+    Temperature (F)   : 678, 223761
+    GCS Total         : 198, 223900
+
+Data quality filters:
+    valuenum IS NOT NULL — excludes missing measurements
+    valuenum > 0         — excludes physiologically impossible values
+
+Aggregation:
+    ROUND(..., 1) applied to all values — one decimal place is the
+    clinical standard for vital sign reporting.
+
+Notes:
+    - Two item IDs per vital sign reflect the CareVue and Metavision
+        charting systems used at different times in MIMIC-III. Both are
+        needed to avoid missing measurements depending on which system
+        was active for a given patient.
+    - n_vital_measurements_24h counts all vital rows regardless of type
+        and serves as a proxy for monitoring intensity.
+*/
+
+# In this case there is only one vital id. 
+# This makes sense b/c this vital comes from lab not measurements from two medical devices
+# v_lab
+CREATE VIEW IF NOT EXISTS v_labs_24h AS
+SELECT
+    i.icustay_id,
+
+    -- Hematocrit
+    ROUND(AVG(CASE WHEN l.itemid = 51221 THEN l.valuenum END), 2) AS hematocrit_mean_24h,
+    ROUND(MIN(CASE WHEN l.itemid = 51221 THEN l.valuenum END), 2) AS hematocrit_min_24h,
+
+    -- Potassium
+    ROUND(AVG(CASE WHEN l.itemid = 50971 THEN l.valuenum END), 2) AS potassium_mean_24h,
+    ROUND(MIN(CASE WHEN l.itemid = 50971 THEN l.valuenum END), 2) AS potassium_min_24h,
+    ROUND(MAX(CASE WHEN l.itemid = 50971 THEN l.valuenum END), 2) AS potassium_max_24h,
+
+    -- Sodium
+    ROUND(AVG(CASE WHEN l.itemid = 50983 THEN l.valuenum END), 2) AS sodium_mean_24h,
+    ROUND(MIN(CASE WHEN l.itemid = 50983 THEN l.valuenum END), 2) AS sodium_min_24h,
+    ROUND(MAX(CASE WHEN l.itemid = 50983 THEN l.valuenum END), 2) AS sodium_max_24h,
+
+    -- Creatinine
+    ROUND(AVG(CASE WHEN l.itemid = 50912 THEN l.valuenum END), 2) AS creatinine_mean_24h,
+    ROUND(MAX(CASE WHEN l.itemid = 50912 THEN l.valuenum END), 2) AS creatinine_max_24h,
+
+    -- Chloride
+    ROUND(AVG(CASE WHEN l.itemid = 50902 THEN l.valuenum END), 2) AS chloride_mean_24h,
+
+    -- Urea Nitrogen (BUN)
+    ROUND(AVG(CASE WHEN l.itemid = 51006 THEN l.valuenum END), 2) AS bun_mean_24h,
+    ROUND(MAX(CASE WHEN l.itemid = 51006 THEN l.valuenum END), 2) AS bun_max_24h,
+
+    -- Bicarbonate
+    ROUND(AVG(CASE WHEN l.itemid = 50882 THEN l.valuenum END), 2) AS bicarb_mean_24h,
+    ROUND(MIN(CASE WHEN l.itemid = 50882 THEN l.valuenum END), 2) AS bicarb_min_24h,
+
+    -- Anion Gap
+    ROUND(AVG(CASE WHEN l.itemid = 50868 THEN l.valuenum END), 2) AS anion_gap_mean_24h,
+    ROUND(MAX(CASE WHEN l.itemid = 50868 THEN l.valuenum END), 2) AS anion_gap_max_24h,
+
+    -- Glucose
+    ROUND(AVG(CASE WHEN l.itemid = 50931 THEN l.valuenum END), 2) AS glucose_mean_24h,
+    ROUND(MIN(CASE WHEN l.itemid = 50931 THEN l.valuenum END), 2) AS glucose_min_24h,
+    ROUND(MAX(CASE WHEN l.itemid = 50931 THEN l.valuenum END), 2) AS glucose_max_24h,
+
+    -- Platelet Count
+    ROUND(AVG(CASE WHEN l.itemid = 51265 THEN l.valuenum END), 2) AS platelets_mean_24h,
+    ROUND(MIN(CASE WHEN l.itemid = 51265 THEN l.valuenum END), 2) AS platelets_min_24h,
+
+    -- Hemoglobin
+    ROUND(AVG(CASE WHEN l.itemid = 51222 THEN l.valuenum END), 2) AS hemoglobin_mean_24h,
+    ROUND(MIN(CASE WHEN l.itemid = 51222 THEN l.valuenum END), 2) AS hemoglobin_min_24h,
+
+    -- White Blood Cells
+    ROUND(AVG(CASE WHEN l.itemid = 51301 THEN l.valuenum END), 2) AS wbc_mean_24h,
+    ROUND(MAX(CASE WHEN l.itemid = 51301 THEN l.valuenum END), 2) AS wbc_max_24h,
+
+    -- MCHC
+    ROUND(AVG(CASE WHEN l.itemid = 51249 THEN l.valuenum END), 2) AS mchc_mean_24h,
+
+    -- MCH
+    ROUND(AVG(CASE WHEN l.itemid = 51248 THEN l.valuenum END), 2) AS mch_mean_24h,
+
+    -- MCV
+    ROUND(AVG(CASE WHEN l.itemid = 51250 THEN l.valuenum END), 2) AS mcv_mean_24h,
+
+    -- Red Blood Cells
+    ROUND(AVG(CASE WHEN l.itemid = 51279 THEN l.valuenum END), 2) AS rbc_mean_24h,
+    ROUND(MIN(CASE WHEN l.itemid = 51279 THEN l.valuenum END), 2) AS rbc_min_24h,
+
+    -- RDW
+    ROUND(AVG(CASE WHEN l.itemid = 51277 THEN l.valuenum END), 2) AS rdw_mean_24h,
+    ROUND(MAX(CASE WHEN l.itemid = 51277 THEN l.valuenum END), 2) AS rdw_max_24h,
+
+    -- Magnesium
+    ROUND(AVG(CASE WHEN l.itemid = 50960 THEN l.valuenum END), 2) AS magnesium_mean_24h,
+    ROUND(MIN(CASE WHEN l.itemid = 50960 THEN l.valuenum END), 2) AS magnesium_min_24h,
+
+    -- Calcium Total
+    ROUND(AVG(CASE WHEN l.itemid = 50893 THEN l.valuenum END), 2) AS calcium_mean_24h,
+    ROUND(MIN(CASE WHEN l.itemid = 50893 THEN l.valuenum END), 2) AS calcium_min_24h,
+
+    -- Phosphate
+    ROUND(AVG(CASE WHEN l.itemid = 50970 THEN l.valuenum END), 2) AS phosphate_mean_24h,
+    ROUND(MAX(CASE WHEN l.itemid = 50970 THEN l.valuenum END), 2) AS phosphate_max_24h,
+
+    -- Total lab draws 
+    COUNT(*) AS n_lab_draws_24h
+
+FROM icustays AS i
+JOIN labevents AS l ON i.subject_id = l.subject_id
+WHERE l.charttime >= i.intime
+AND   l.charttime <= DATETIME(i.intime, '+24 hours')
+AND   l.valuenum IS NOT NULL
+AND   l.valuenum > 0
+GROUP BY i.icustay_id;

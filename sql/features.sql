@@ -1,102 +1,42 @@
-"""
-Create 7 View Tables. 
-1. v_cohort 
-    Purpose: The base table. Every other view joins back to this one. 
-    
-    Source tables: 
-        * icustays: contains icu entry times/exist
-        * admissions: hospital admission/discharge times, insurance, ethnicity, admission type
-        * patients: gender, date of birth, date of death   
-    
-    What it computes: 
-        * ICU length of stay in hours using JULIANDAY() math
-        * Hospital length of stay in days
-        * Patient age of admission
-        * Admission type, insurance, ethnicity, gender
-        * The target variable - `died_in_hospital` as a 0/1 flag from `hospital_expire_flag`
-        * Data of death for survival analysis
-    
-    Why it exists: Every ML row needs a spine and one row per ICU stay with the target label attached is the spine.
+/*
+View    : v_cohort
+Purpose : Base cohort table — the spine of the feature matrix.
+            One row per ICU stay with patient demographics, length of
+            stay calculations, and the target variable for ML modeling.
 
-2. v_vitals_24h
-    Purpose: Summarise vital signs in the first 24 hours of each ICU stay.
-    
-    Source tables: icustays, chartevents
-    
-    What it computes: For each vital sign — mean, min, max values within the 24-hour window. Also counts total vital measurements as a proxy for monitoring intensity.
-    
-    The time window: charttime BETWEEN intime AND DATETIME(intime, '+24 hours')
-    
-    Key concept — item IDs: MIMIC doesn't store `heart rate` as a column name. It stores a numeric itemid. Heart rate is itemid 211 (CareVue system) and 220045 (Metavision system). The SQL uses CASE WHEN itemid IN (211, 220045) to pull the right measurements regardless of which system recorded them.
-    
-    Why first 24 hours: Vital sign trends in the first 24 hours of ICU admission are strongly predictive of outcomes. Using a fixed window makes features comparable across patients with different length stays.
+Source tables:
+    icustays    — ICU entry/exit times and stay identifiers
+    admissions  — Hospital admission/discharge times, admission type,
+                    insurance, ethnicity, and mortality flag
+    patients    — Patient demographics (gender, date of birth, date of death)
 
-3. v_labs_24h
-    Purpose: Same idea as vitals but for lab results.
-    
-    Source tables: icustays, labevents
-    
-    What it computes: Max, min, or mean of key lab values in the first 24 hours — creatinine, BUN, lactate, WBC, hemoglobin, platelets, sodium, potassium, bicarbonate, bilirubin. Also a binary flag for lactate > 4.0 which is a clinical threshold for severe sepsis.
-    
-    Same item ID concept: Creatinine is itemid 50912, lactate is 50813, etc.
+Computed columns:
+    icu_los_hours   — ICU length of stay in hours using JULIANDAY() arithmetic
+    hosp_los_days   — Hospital length of stay in days
+    age_at_admit    — Patient age at time of hospital admission in years
 
-    Why these labs: They cover the major organ systems — renal (creatinine, BUN), sepsis severity (lactate), infection (WBC), anaemia (hemoglobin), liver (bilirubin), electrolytes (sodium, potassium, bicarbonate).
+Target variable:
+    died_in_hospital — Binary 0/1 flag derived from hospital_expire_flag
+                        in the admissions table. 1 = patient died during
+                        this hospital admission, 0 = survived to discharge.
 
-4. v_comorbidites
-    Purpose: Flag which chronic conditions each patient has on admission.
+Notes:
+    - All 100 demo patients were selected because they eventually die,
+        so died_in_hospital will be skewed toward 1. Keep this in mind
+        when interpreting model performance.
+    - Grain is one row per ICU stay, not one row per patient. A single
+        patient can have multiple ICU stays across multiple admissions.
+*/
+CREATE VIEW IF NOT EXISTS v_cohort AS 
+SELECT 
+    p.subject_id, p.dob,
+    i.intime, i.outtime, 
+    a.admittime, a.dischtime,
     
-    Source table: diagnoses_icd
-    
-    What it computes: Binary 0/1 flags for CHF, diabetes, CKD, COPD, sepsis, cancer. Also total number of diagnoses as a complexity measure.
-    
-    How it works: ICD-9 codes are grouped by prefix. CHF codes all start with 428, diabetes with 250, CKD with 585 etc. LIKE '428%' catches all variants.
-    
-    Why MAX(): A patient can have multiple diagnosis rows. MAX(CASE WHEN ... THEN 1 ELSE 0 END) returns 1 if any row matches, 0 if none do — effectively an OR across all diagnosis rows for that patient.
+    ROUND((JULIANDAY(outtime) - JULIANDAY(intime)) * 24, 2) AS icu_los_hours,
+    ROUND(JULIANDAY(dischtime) - JULIANDAY(admittime), 2) AS hosp_los_days,
+    ROUND((JULIANDAY(admittime) - JULIANDAY(dob)) / 365, 1) AS age_at_admit
+FROM icustays AS i 
+JOIN admissions AS a ON i.hadm_id = a.hadm_id
+JOIN patients AS p ON a.subject_id = p.subject_id
 
-5. v_prior_admissions
-    Purpose: Count how many times each patient was admitted before this admission.
-    
-    Source table: admissions (self-join)
-    
-    How it works: Joins admissions to itself — a1 is the current admission, a2 is any earlier admission for the same patient where a2.admittime < a1.admittime. Counting a2 rows gives prior admissions.
-    
-    Why it matters: Prior admissions is one of the strongest predictors of readmission risk.
-
-6. v_vasopressors
-    Purpose: Flag whether vasopressors were used during the ICU stay.
-
-    Source tables: inputevents_cv, inputevents_mv
-    
-    What it computes: A simple binary flag — 1 if any vasopressor was given, 0 if not.
-    
-    Why two tables: MIMIC-III has two medication input systems — CareVue (CV) and Metavision (MV). Each has its own table and its own item IDs for the same drugs. The UNION combines both so no patient is missed regardless of which system was used.
-
-7. v_features
-    Purpose: The master view — joins all 6 views into one flat table.
-    
-    What it computes: Nothing new. Just LEFT JOINs every view onto v_cohort using icustay_id or hadm_id as the key. LEFT JOIN means patients with no lab results, no vasopressors etc. still appear — their columns just come through as NULL which Python handles with median imputation.
-    
-    This is what Python queries: SELECT * FROM v_features is the single query that pulls the entire feature matrix into pandas.
-"""
-
-# ========================================
-# Table View 1: v_cohort
-# =========================================
-# Can join icustays with admission through 'hadm_id'
-# Can join icustays with patients through 'subject_id'
-
-# From icustays need columns: [intime, outime] 
-#   To determine length of stay in ICU
-# FROM admissions need columns: [admittime, dischtime]
-#   To determine hospital length of stay
-# FROM patients need columns: [dob]
-#   determine the age of patients using admittime
-
-# =========================================
-# Table View 2: v_vitals_24h
-# =========================================
-# Can join icustays with chartevents through `subject id`
-# We need columns intime from icustays
-    # Help us view the admission time when patient entered ICU
-# Need columns itemid, charttime, and valuenum from chartevents
-    # Determine individual vital signs with itemid, charttime, and valuenum

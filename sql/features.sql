@@ -347,3 +347,47 @@ SELECT
 
 FROM diagnoses_icd AS d
 GROUP BY d.subject_id, d.hadm_id;
+
+/*
+View    : v_prior_admissions
+Purpose : Count of prior hospital admissions for each patient before
+            the current admission. A strong predictor of readmission risk
+            and patient complexity.
+
+Source table:
+    admissions — Self-joined to compare each admission against all
+                    earlier admissions for the same patient
+
+Self-join logic:
+    a1 = current admission
+    a2 = any earlier admission for the same patient
+    JOIN condition: a1.subject_id = a2.subject_id
+                AND a2.admittime < a1.admittime
+
+Join type:
+    LEFT JOIN — ensures patients on their first admission are retained
+    in the result with n_prior_admissions = 0. An INNER JOIN would
+    exclude first-time admissions entirely.
+
+Aggregation:
+    COUNT(a2.hadm_id) — counts matching prior admission rows.
+    Returns 0 for first admissions (no a2 rows match),
+    1+ for patients with prior history.
+
+Notes:
+    - In the MIMIC-III demo most patients have only one admission since
+        the cohort was selected based on mortality. The feature still adds
+        value as a binary signal (ever admitted before vs never).
+    - Grain is hadm_id — joins to v_cohort on hadm_id in v_features.
+*/
+CREATE VIEW IF NOT EXISTS v_prior_admissions AS
+SELECT
+    a1.subject_id,
+    a1.hadm_id,
+    COUNT(a2.hadm_id) AS n_prior_admissions
+FROM admissions AS a1
+LEFT JOIN admissions AS a2
+    ON  a1.subject_id = a2.subject_id
+    AND a2.admittime  < a1.admittime
+GROUP BY a1.subject_id, a1.hadm_id
+ORDER BY n_prior_admissions DESC;

@@ -27,18 +27,30 @@ Notes:
     - Grain is one row per ICU stay, not one row per patient. A single
         patient can have multiple ICU stays across multiple admissions.
 */
-CREATE VIEW IF NOT EXISTS v_cohort AS 
-SELECT 
-    p.subject_id, p.dob,
-    i.intime, i.outtime, 
-    a.admittime, a.dischtime,
+DROP VIEW IF EXISTS v_cohort;
     
-    ROUND((JULIANDAY(outtime) - JULIANDAY(intime)) * 24, 2) AS icu_los_hours,
-    ROUND(JULIANDAY(dischtime) - JULIANDAY(admittime), 2) AS hosp_los_days,
-    ROUND((JULIANDAY(admittime) - JULIANDAY(dob)) / 365, 1) AS age_at_admit
+CREATE VIEW IF NOT EXISTS v_cohort AS
+SELECT 
+    p.subject_id,
+    i.hadm_id,
+    i.icustay_id,
+    p.gender,
+    a.admission_type,
+    a.insurance,
+    a.ethnicity,
+    p.dob,
+    p.dod,
+    i.intime, 
+    i.outtime, 
+    a.admittime, 
+    a.dischtime,
+    ROUND((JULIANDAY(i.outtime)   - JULIANDAY(i.intime))   * 24, 2) AS icu_los_hours,
+    ROUND( JULIANDAY(a.dischtime) - JULIANDAY(a.admittime),       2) AS hosp_los_days,
+    ROUND((JULIANDAY(a.admittime) - JULIANDAY(p.dob))      / 365.25, 1) AS age_at_admit,
+    CASE WHEN a.hospital_expire_flag = 1 THEN 1 ELSE 0 END AS died_in_hospital
 FROM icustays AS i 
-JOIN admissions AS a ON i.hadm_id = a.hadm_id
-JOIN patients AS p ON a.subject_id = p.subject_id;
+JOIN admissions AS a ON i.hadm_id    = a.hadm_id
+JOIN patients   AS p ON a.subject_id = p.subject_id;
 
 /*
 View    : v_vitals_24h
@@ -172,9 +184,6 @@ Notes:
         and serves as a proxy for monitoring intensity.
 */
 
-# In this case there is only one vital id. 
-# This makes sense b/c this vital comes from lab not measurements from two medical devices
-# v_lab
 CREATE VIEW IF NOT EXISTS v_labs_24h AS
 SELECT
     i.icustay_id,
@@ -487,38 +496,114 @@ Usage:
     categorical encoding, outlier clipping, and NaN imputation
     before being handed to XGBoost in model.py.
 */
+DROP VIEW IF EXISTS v_features;
+
 CREATE VIEW IF NOT EXISTS v_features AS
 SELECT
-    -- from v_cohort
+    -- v_cohort (all columns)
     c.subject_id,
     c.hadm_id,
     c.icustay_id,
     c.gender,
-    c.age_at_admit,
-    c.icu_los_hours,
-    c.hosp_los_days,
     c.admission_type,
     c.insurance,
+    c.ethnicity,
+    c.dob,
+    c.dod,
+    c.intime,
+    c.outtime,
+    c.admittime,
+    c.dischtime,
+    c.icu_los_hours,
+    c.hosp_los_days,
+    c.age_at_admit,
     c.died_in_hospital,
 
-    -- from v_vitals_24h
-    v.*,  -- or list each column explicitly
+    -- v_vitals_24h (skip icustay_id)
+    v.hr_mean_24h,
+    v.hr_min_24h,
+    v.hr_max_24h,
+    v.sbp_mean_24h,
+    v.sbp_min_24h,
+    v.sbp_max_24h,
+    v.spo2_mean_24h,
+    v.spo2_min_24h,
+    v.spo2_max_24h,
+    v.resp_mean_24h,
+    v.resp_min_24h,
+    v.resp_max_24h,
+    v.temp_mean_24h,
+    v.temp_min_24h,
+    v.temp_max_24h,
+    v.gcs_mean_24h,
+    v.gcs_min_24h,
+    v.gcs_max_24h,
+    v.n_vital_measurements_24h,
 
-    -- from v_labs_24h
-    l.*,
+    -- v_labs_24h (skip icustay_id)
+    l.hematocrit_mean_24h,
+    l.hematocrit_min_24h,
+    l.potassium_mean_24h,
+    l.potassium_min_24h,
+    l.potassium_max_24h,
+    l.sodium_mean_24h,
+    l.sodium_min_24h,
+    l.sodium_max_24h,
+    l.creatinine_mean_24h,
+    l.creatinine_max_24h,
+    l.chloride_mean_24h,
+    l.bun_mean_24h,
+    l.bun_max_24h,
+    l.bicarb_mean_24h,
+    l.bicarb_min_24h,
+    l.anion_gap_mean_24h,
+    l.anion_gap_max_24h,
+    l.glucose_mean_24h,
+    l.glucose_min_24h,
+    l.glucose_max_24h,
+    l.platelets_mean_24h,
+    l.platelets_min_24h,
+    l.hemoglobin_mean_24h,
+    l.hemoglobin_min_24h,
+    l.wbc_mean_24h,
+    l.wbc_max_24h,
+    l.mchc_mean_24h,
+    l.mch_mean_24h,
+    l.mcv_mean_24h,
+    l.rbc_mean_24h,
+    l.rbc_min_24h,
+    l.rdw_mean_24h,
+    l.rdw_max_24h,
+    l.magnesium_mean_24h,
+    l.magnesium_min_24h,
+    l.calcium_mean_24h,
+    l.calcium_min_24h,
+    l.phosphate_mean_24h,
+    l.phosphate_max_24h,
+    l.n_lab_draws_24h,
 
-    -- from v_comorbidities
-    co.*,
+    -- v_comorbidities (skip subject_id, hadm_id)
+    co.has_hypertension,
+    co.has_afib,
+    co.has_aki,
+    co.has_chf,
+    co.has_diabetes,
+    co.has_resp_failure,
+    co.has_sepsis,
+    co.has_anemia,
+    co.has_cad,
+    co.has_acidosis,
+    co.n_diagnoses,
 
-    -- from v_prior_admissions
+    -- v_prior_admissions (skip subject_id, hadm_id)
     pa.n_prior_admissions,
 
-    -- from v_vasopressors (special handling for NULL)
+    -- v_vasopressors (COALESCE handles NULL for stays with no vasopressors)
     COALESCE(vp.vasopressor_flag, 0) AS vasopressor_flag
 
 FROM v_cohort AS c
-LEFT JOIN v_vitals_24h AS v  ON c.icustay_id = v.icustay_id
-LEFT JOIN v_labs_24h AS l  ON c.icustay_id = l.icustay_id
-LEFT JOIN v_comorbidities AS co ON c.hadm_id = co.hadm_id
-LEFT JOIN v_prior_admissions AS pa ON c.hadm_id = pa.hadm_id
-LEFT JOIN v_vasopressors AS vp ON c.icustay_id = vp.icustay_id
+LEFT JOIN v_vitals_24h       AS v  ON c.icustay_id = v.icustay_id
+LEFT JOIN v_labs_24h         AS l  ON c.icustay_id = l.icustay_id
+LEFT JOIN v_comorbidities    AS co ON c.hadm_id    = co.hadm_id
+LEFT JOIN v_prior_admissions AS pa ON c.hadm_id    = pa.hadm_id
+LEFT JOIN v_vasopressors     AS vp ON c.icustay_id = vp.icustay_id;

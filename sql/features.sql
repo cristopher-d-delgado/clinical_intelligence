@@ -268,3 +268,82 @@ AND   l.charttime <= DATETIME(i.intime, '+24 hours')
 AND   l.valuenum IS NOT NULL
 AND   l.valuenum > 0
 GROUP BY i.icustay_id;
+
+/*
+View    : v_comorbidities
+Purpose : Binary flags indicating the presence of key chronic conditions
+            and acute diagnoses at the time of hospital admission.
+            One row per hospital admission (hadm_id level, not ICU stay level).
+
+Source table:
+    diagnoses_icd — ICD-9 diagnosis codes assigned to each admission
+
+Conditions flagged:
+    has_hypertension  — ICD-9: 4019   (Unspecified essential hypertension)
+    has_afib          — ICD-9: 42731  (Atrial fibrillation)
+    has_aki           — ICD-9: 584%   (Acute kidney failure, all variants)
+    has_chf           — ICD-9: 428%   (Congestive heart failure, all variants)
+    has_diabetes      — ICD-9: 250%   (Diabetes mellitus, all variants)
+    has_resp_failure  — ICD-9: 51881  (Acute respiratory failure)
+    has_sepsis        — ICD-9: 99592, 0389 (Severe sepsis + Septicemia)
+    has_anemia        — ICD-9: 285%   (Anemia, all variants)
+    has_cad           — ICD-9: 414%   (Coronary artery disease, all variants)
+    has_acidosis      — ICD-9: 2762   (Acidosis)
+
+Aggregation:
+    MAX(CASE WHEN icd9_code ... THEN 1 ELSE 0 END)
+    Returns 1 if any diagnosis row for this admission matches the
+    condition, 0 if none match. Effectively an OR across all diagnosis
+    rows per admission.
+
+Additional column:
+    n_diagnoses — COUNT(DISTINCT icd9_code) as a patient complexity proxy.
+                    Higher values indicate more comorbid conditions.
+
+Notes:
+    - Conditions were selected based on the top 20 most frequent diagnoses
+        in the MIMIC-III demo dataset, filtered for clinical relevance to
+        ICU mortality prediction.
+    - LIKE patterns (e.g. '428%') capture all sub-variants of a condition
+        family rather than a single specific code.
+    - Grain is hadm_id — joins to v_cohort on hadm_id in v_features.
+*/
+CREATE VIEW IF NOT EXISTS v_comorbidities AS
+SELECT
+    d.subject_id,
+    d.hadm_id,
+    -- Hypertension
+    MAX(CASE WHEN d.icd9_code = '4019' THEN 1 ELSE 0 END) AS has_hypertension,
+
+    -- Atrial Fibrillation
+    MAX(CASE WHEN d.icd9_code = '42731' THEN 1 ELSE 0 END) AS has_afib,
+
+    -- Acute Kidney Failure
+    MAX(CASE WHEN d.icd9_code LIKE '584%' THEN 1 ELSE 0 END) AS has_aki,
+
+    -- CHF
+    MAX(CASE WHEN d.icd9_code LIKE '428%' THEN 1 ELSE 0 END) AS has_chf,
+
+    -- Diabetes
+    MAX(CASE WHEN d.icd9_code LIKE '250%' THEN 1 ELSE 0 END) AS has_diabetes,
+
+    -- Acute Respiratory Failure
+    MAX(CASE WHEN d.icd9_code = '51881' THEN 1 ELSE 0 END) AS has_resp_failure,
+
+    -- Sepsis (both codes combined)
+    MAX(CASE WHEN d.icd9_code IN ('99592', '0389') THEN 1 ELSE 0 END) AS has_sepsis,
+
+    -- Anemia
+    MAX(CASE WHEN d.icd9_code LIKE '285%' THEN 1 ELSE 0 END) AS has_anemia,
+
+    -- Coronary Artery Disease
+    MAX(CASE WHEN d.icd9_code LIKE '414%' THEN 1 ELSE 0 END) AS has_cad,
+
+    -- Acidosis
+    MAX(CASE WHEN d.icd9_code = '2762' THEN 1 ELSE 0 END) AS has_acidosis,
+
+    -- Total diagnoses (complexity proxy)
+    COUNT(DISTINCT d.icd9_code) AS n_diagnoses
+
+FROM diagnoses_icd AS d
+GROUP BY d.subject_id, d.hadm_id;
